@@ -341,7 +341,7 @@ def build_policy(
         '/sbin',
         '/lib',
         '/lib64',
-        os.path.dirname(os.path.realpath(spatch)),  # standard.h/.iso are its siblings
+        *_spatch_payload_dirs(spatch),
         os.path.realpath(sys.base_prefix),
         os.path.realpath(sys.prefix),
         # The package's own parent, which an editable install or `python -m
@@ -395,6 +395,29 @@ def _import_roots() -> list[str]:
         if resolved not in excluded and os.path.isdir(resolved):
             roots.append(resolved)
     return roots
+
+
+def _spatch_payload_dirs(spatch: str) -> list[str]:
+    """Where this spatch reads standard.h and standard.iso, in coccinelle's own order.
+
+    globals/cocciconfig.ml resolves the payload as $COCCINELLE_HOME, else the
+    binary's directory when it holds standard.iso (the bundled wheel's layout),
+    else <prefix>/<libdir>/coccinelle beside <prefix>/bin (make install, an opam
+    switch). Granting only the binary's directory read the wheel right and denied
+    every installed build its standard.h: `Sys_error ... Permission denied`, exit 2,
+    on every rule. _clean drops whichever of these does not exist.
+    """
+    bindir = os.path.dirname(os.path.realpath(spatch))
+    prefix = os.path.dirname(bindir)
+    dirs = [
+        bindir,
+        os.path.join(prefix, 'lib', 'coccinelle'),
+        os.path.join(prefix, 'lib64', 'coccinelle'),
+    ]
+    home = os.environ.get('COCCINELLE_HOME')
+    if home:
+        dirs.insert(0, os.path.realpath(home))
+    return dirs
 
 
 def _clean(paths: list[str]) -> tuple[str, ...]:

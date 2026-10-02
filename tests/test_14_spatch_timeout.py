@@ -12,10 +12,14 @@ is installed, so a coccinelle that renames it fails here instead of quietly
 classifying every timeout as "nothing to see".
 """
 
+import glob
+import logging
+import os
 import pickle
 import subprocess
 
 import pytest
+from conftest import SPATCH_TRAILER, TORN_CACHE_STDERR, write_tree
 
 import cvehound
 from cvehound.exception import SpatchError, SpatchTimeout, SpatchTruncated
@@ -55,16 +59,16 @@ def test_parmap_shape_is_a_timeout_with_no_file():
     assert parse_spatch_timeout(PARMAP_STDERR) == []
 
 
-BENIGN_STDERR = [
-    '',
-    'init_defs_builtins: /usr/share/coccinelle/standard.h\n',
-    # A different fatal exception is a SpatchError (non-zero exit), neither a
-    # timeout nor a truncation.
-    'Fatal error: exception Coccinelle_modules.Common.UnixExit(2)\n',
-]
-
-
-@pytest.mark.parametrize('stderr', BENIGN_STDERR)
+@pytest.mark.parametrize(
+    'stderr',
+    [
+        '',
+        'init_defs_builtins: /usr/share/coccinelle/standard.h\n',
+        # A different fatal exception is a SpatchError, not a timeout.
+        'Fatal error: exception Coccinelle_modules.Common.UnixExit(2)\n',
+        'EXN: Failure("bad") in /k/a.c\n',
+    ],
+)
 def test_benign_stderr_is_not_a_timeout(stderr):
     assert parse_spatch_timeout(stderr) is None
 
@@ -88,100 +92,97 @@ def test_wall_and_engine_budgets_read_differently():
 
 # --- truncation: a file spatch gave up on for any reason but a timeout -------
 
-TRAILER = 'An error occurred when attempting to transform some files.\n'
-# Captured from the wheel's spatch over a directory whose AST-cache entry for the
-# one file it had to parse was truncated to 100 bytes (exit 0, empty stdout).
-TORN_CACHE_STDERR = (
-    'EXN: Failure("input_value: truncated object") in /k/net/mptcp/protocol.c\n' + TRAILER
-)
-OOM_STDERR = 'EXN: Out_of_memory in /k/drivers/a.c\n' + TRAILER
-MIXED_STDERR = DIRECTORY_STDERR[: -len(TRAILER)] + 'EXN: End_of_file in /k/drivers/c.c\n' + TRAILER
-
 
 @pytest.mark.parametrize(
-    ('stderr', 'expected'),
+    ('stderr', 'dropped'),
     [
         (
             TORN_CACHE_STDERR,
             [('Failure("input_value: truncated object")', '/k/net/mptcp/protocol.c')],
         ),
-        (OOM_STDERR, [('Out_of_memory', '/k/drivers/a.c')]),
-        # Formerly pinned here as benign: it is the shape of a file never scanned.
-        ('EXN: Failure("bad") in /k/a.c\n', [('Failure("bad")', '/k/a.c')]),
+        (
+            'EXN: Out_of_memory in /k/drivers/a.c\n' + SPATCH_TRAILER,
+            [('Out_of_memory', '/k/drivers/a.c')],
+        ),
         # The exception's own text may say " in "; the file follows the last one.
         (
             'EXN: Failure("error in parsing") in /k/a.c\n',
             [('Failure("error in parsing")', '/k/a.c')],
         ),
+        # Empty means "incomplete, files unknown" -- callers must not read it as None.
+        (SPATCH_TRAILER, []),
+        # Timeouts are parse_spatch_timeout's, even beside a file dropped for another reason.
+        (DIRECTORY_STDERR, None),
+        (
+            DIRECTORY_STDERR[: -len(SPATCH_TRAILER)]
+            + 'EXN: End_of_file in /k/drivers/c.c\n'
+            + SPATCH_TRAILER,
+            [('End_of_file', '/k/drivers/c.c')],
+        ),
+        (FILE_LIST_STDERR.format(''), None),
+        (PARMAP_STDERR, None),
+        ('', None),
+        ('init_defs_builtins: /usr/share/coccinelle/standard.h\n', None),
     ],
-    ids=['torn-cache', 'out-of-memory', 'formerly-benign', 'in-inside-exn'],
+    ids=[
+        'torn-cache',
+        'out-of-memory',
+        'in-inside-exn',
+        'trailer-only',
+        'timeouts',
+        'timeouts-and-a-drop',
+        'file-list-timeout',
+        'parmap-timeout',
+        'empty',
+        'benign',
+    ],
 )
-def test_a_dropped_file_is_a_truncation_not_a_timeout(stderr, expected):
-    assert parse_spatch_timeout(stderr) is None
-    assert parse_spatch_truncation(stderr) == expected
-
-
-def test_trailer_alone_is_truncated_files_unknown():
-    # Empty means "incomplete, files unknown" -- callers must not read it as None.
-    assert parse_spatch_truncation(TRAILER) == []
-
-
-def test_the_timeout_directory_shape_is_not_a_truncation():
-    # Same trailer, but every dropped file timed out: parse_spatch_timeout owns it.
-    assert parse_spatch_truncation(DIRECTORY_STDERR) is None
-
-
-def test_mixed_shape_reports_only_the_non_timeout_drops():
-    assert parse_spatch_truncation(MIXED_STDERR) == [('End_of_file', '/k/drivers/c.c')]
-
-
-@pytest.mark.parametrize('stderr', BENIGN_STDERR + [FILE_LIST_STDERR.format(''), PARMAP_STDERR])
-def test_benign_and_timeout_stderr_is_not_a_truncation(stderr):
-    assert parse_spatch_truncation(stderr) is None
+def test_a_dropped_file_is_a_truncation(stderr, dropped):
+    assert parse_spatch_truncation(stderr) == dropped
 
 
 def test_truncation_survives_the_pool_boundary():
-    err = SpatchTruncated('CVE-1', '/k', 0, TORN_CACHE_STDERR, [('End_of_file', 'a.c')], True)
+    err = SpatchTruncated(
+        'CVE-1', '/k', 0, '', [('End_of_file', 'a.c'), ('End_of_file', 'b.c')], True
+    )
     back = pickle.loads(pickle.dumps(err))
     assert isinstance(back, SpatchError)
-    assert (back.dropped, back.retried, back.files) == ([('End_of_file', 'a.c')], True, ['a.c'])
-    assert str(back) == str(err)
+    assert (back.dropped, back.retried) == (err.dropped, True)
+    assert 'dropped 2 files (a.c, b.c) mid-scan in /k: End_of_file after one retry' in str(back)
+    assert 'files it did not name' in str(SpatchTruncated('CVE-1', '/k', 0, SPATCH_TRAILER, []))
 
 
-def test_truncation_message_names_files_and_causes():
-    named = SpatchTruncated('CVE-1', '/k', 0, '', [('End_of_file', 'a.c'), ('End_of_file', 'b.c')])
-    unnamed = SpatchTruncated('CVE-1', '/k', 0, TRAILER, [], retried=True)
-    assert 'dropped 2 files (a.c, b.c) mid-scan in /k: End_of_file' in str(named)
-    assert 'files it did not name' in str(unnamed)
-    assert 'after one retry' in str(unnamed)
+# --- _run_spatch hands back only a scan that finished ------------------------
 
 
 @pytest.mark.parametrize(
-    ('returncode', 'stderr', 'raised'),
+    ('returncode', 'stderr', 'raised', 'files'),
     [
-        (0, TORN_CACHE_STDERR, SpatchTruncated),
-        (0, TRAILER, SpatchTruncated),
-        (0, DIRECTORY_STDERR, SpatchTimeout),
+        (0, 'init_defs_builtins: /usr/share/coccinelle/standard.h\n', None, None),
+        (0, TORN_CACHE_STDERR, SpatchTruncated, ['net/mptcp/protocol.c']),
+        (0, SPATCH_TRAILER, SpatchTruncated, []),
+        (0, DIRECTORY_STDERR, SpatchTimeout, ['drivers/a.c', 'drivers/b.c']),
         # A non-zero exit is the engine's own failure whatever it printed first.
-        (2, TORN_CACHE_STDERR, SpatchError),
+        (2, TORN_CACHE_STDERR, SpatchError, None),
     ],
-    ids=['torn-cache', 'trailer-only', 'timeout-wins', 'nonzero-is-an-error'],
+    ids=['complete', 'torn-cache', 'trailer-only', 'timeout-wins', 'nonzero-is-an-error'],
 )
-def test_run_spatch_never_returns_an_incomplete_scan(monkeypatch, returncode, stderr, raised):
-    """The transport-level contract: a dropped file raises, and only the kind it raises varies."""
-    monkeypatch.setattr(cvehound, '_exec_spatch', lambda cmd, env, wall: (returncode, '', stderr))
-    with pytest.raises(raised) as excinfo:
-        cvehound._run_spatch('CVE-2022-50071', '/k', ['spatch'], 60, '/tmp')
-    assert type(excinfo.value) is raised
-    if raised is SpatchTruncated and excinfo.value.dropped:
-        assert excinfo.value.files == ['net/mptcp/protocol.c']
-
-
-def test_run_spatch_still_returns_a_complete_scan(monkeypatch):
+def test_run_spatch_returns_only_a_complete_scan(monkeypatch, returncode, stderr, raised, files):
     monkeypatch.setattr(
-        cvehound, '_exec_spatch', lambda cmd, env, wall: (0, 'hits', BENIGN_STDERR[1])
+        cvehound, '_exec_spatch', lambda cmd, env, wall: (returncode, 'hits', stderr)
     )
-    assert cvehound._run_spatch('CVE-1', '/k', ['spatch'], 60, '/tmp') == 'hits'
+
+    def run():
+        return cvehound._run_spatch('CVE-1', '/k', ['spatch'], 60, '/tmp')
+
+    if raised is None:
+        assert run() == 'hits'
+        return
+    with pytest.raises(raised) as excinfo:
+        run()
+    assert type(excinfo.value) is raised
+    if files is not None:
+        assert excinfo.value.files == files
 
 
 # --- live: whatever spatch is installed still prints what we match on --------
@@ -233,17 +234,22 @@ def slow_tree(tmp_path_factory):
     return root
 
 
-@pytest.fixture
-def slow_hound(hound, slow_tree):
-    """A CVEhound pointed at that tree, with the rule registered under CVE.
+def hound_with_rule(hound, tree, cve, rule):
+    """A CVEhound pointed at tree, with rule registered under cve.
 
     hound_at only retargets .kernel; cve_all_rules and rules_metadata are shared
     with the session-wide instance, so both are replaced rather than mutated.
     """
-    at = hound_at(hound, str(slow_tree))
-    at.cve_all_rules = {**hound.cve_all_rules, CVE: str(slow_tree / f'{CVE}.cocci')}
+    at = hound_at(hound, str(tree))
+    at.cve_all_rules = {**hound.cve_all_rules, cve: str(rule)}
     at.rules_metadata = {}
     return at
+
+
+@pytest.fixture
+def slow_hound(hound, slow_tree):
+    """A CVEhound pointed at that tree, with the rule registered under CVE."""
+    return hound_with_rule(hound, slow_tree, CVE, slow_tree / f'{CVE}.cocci')
 
 
 # The hinted-files shape depends on the build: stock spatch dies with the
@@ -307,3 +313,61 @@ def test_wall_watchdog_leaves_no_parmap_children(slow_hound, slow_tree, tmp_path
         ['pgrep', '-fa', str(slow_tree / f'{CVE}.cocci')], capture_output=True, text=True
     )
     assert survivors.stdout == '', survivors.stdout
+
+
+# --- live: a torn AST-cache entry is healed, not read as silence -------------
+
+UAF_CVE = 'CVE-0000-0001'
+UAF_RULE = """\
+/// Files: a.c
+
+@r@
+expression t;
+@@
+
+* free_thing(t);
+  ...
+  use(t);
+"""
+
+
+@pytest.fixture
+def torn_hound(hound, tmp_path):
+    """A one-file tree the rule fires on, scanned with a private AST cache."""
+    tree = tmp_path / 'tree'
+    write_tree(
+        tree,
+        {
+            'a.c': 'struct thing { int v; };\nvoid f(struct thing *t)\n{\n\tfree_thing(t);\n\tuse(t);\n}\n'
+        },
+    )
+    rule = tmp_path / f'{UAF_CVE}.cocci'
+    rule.write_text(UAF_RULE)
+    at = hound_with_rule(hound, tree, UAF_CVE, rule)
+    at.astcache = str(tmp_path / 'ast')
+    return at
+
+
+def tear(astcache: str) -> str:
+    """Cut the one cached parse to 100 bytes, as a killed writer or a full disk would."""
+    (entry,) = glob.glob(os.path.join(astcache, '**', 'a.c.ast_raw'), recursive=True)
+    os.truncate(entry, 100)
+    return entry
+
+
+@pytest.mark.parametrize('jobs', [1, 2])
+def test_a_torn_cache_entry_is_healed_not_read_as_silence(torn_hound, caplog, jobs):
+    """A torn AST-cache entry, end to end.
+
+    Before: `EXN: Failure("input_value: truncated object") in a.c`, exit 0, no
+    findings -- "not vulnerable" for a file never scanned, on every scan sharing
+    the cache. jobs=2 pins that parmap replays its workers' stderr, where the EXN
+    line is printed, before the parent's trailer.
+    """
+    assert torn_hound.check_cve(UAF_CVE, True, jobs=jobs)
+    entry = tear(torn_hound.astcache)
+    with caplog.at_level(logging.WARNING, logger='cvehound.spatch'):
+        assert torn_hound.check_cve(UAF_CVE, True, jobs=jobs)
+    assert 'dropped a.c mid-scan' in caplog.text and 'input_value' in caplog.text
+    assert 'without the AST cache' in caplog.text
+    assert not os.path.exists(entry), 'the torn entry must be evicted, or every scan pays again'

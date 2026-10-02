@@ -20,12 +20,14 @@ from cvehound.exception import (
 from cvehound.kbuild import KbuildParser
 from cvehound.util import (
     astcache_dir,
+    astcache_evict,
     find_spatch,
     fix_date_str,
     get_cves_metadata,
     get_rule_cves,
     get_spatch_version,
     get_srcarch,
+    is_cache_fault,
     killpg,
     parse_coccinelle_output,
     parse_spatch_timeout,
@@ -212,17 +214,32 @@ def _run_spatch(
     demanded says the transport was asked for rather than inferred, which is
     the difference between "fall back quietly" and "fail so the user finds
     out": a mode that silently does something else cannot be tested.
+
+    A run that dropped files is never returned. It gets at most one rerun, and
+    only when truncation_retry() names a cause the rerun removes; a second
+    truncation is the answer. With the transport fallback above that bounds a
+    request at three invocations: a failed zygote child, the exec that replaced
+    it, and that exec again without the AST cache.
     """
     env = _spatch_env(kernel)
+
+    def attempt(argv: list[str], on_zygote: bool, degrade: bool = False) -> tuple[int, str, str]:
+        # Every invocation answers to the same wall budget, and a timeout reads
+        # the same on either transport: whatever spatch said before the kill is
+        # the only clue to where it wedged, and both hand it over as the message.
+        try:
+            if on_zygote:
+                return spatch_zygote.run(argv, env, workdir, wall_timeout, degrade=degrade)
+            return _exec_spatch(argv, env, wall_timeout)
+        except TimeoutError as err:
+            raise SpatchTimeout(
+                cve, kernel, -signal.SIGKILL, str(err), wall_timeout, wall=True
+            ) from err
+
     degraded: str | None = None
     returncode, stdout, stderr = 0, '', ''
     try:
-        if zygote:
-            returncode, stdout, stderr = spatch_zygote.run(
-                cmd, env, workdir, wall_timeout, degrade=not demanded
-            )
-        else:
-            returncode, stdout, stderr = _exec_spatch(cmd, env, wall_timeout)
+        returncode, stdout, stderr = attempt(cmd, zygote, degrade=not demanded)
     except spatch_zygote.ZygoteUnsupported as err:
         # This spatch cannot serve; it said so on its first request and will
         # not be asked again. Finish this CVE on the stock transport so the
@@ -240,12 +257,6 @@ def _run_spatch(
         if demanded:
             raise SpatchError(cve, kernel, -1, str(err)) from err
         degraded = f'zygote died, retrying without it ({err})'
-    except TimeoutError as err:
-        # Whatever spatch said before the kill is the only clue to where it
-        # wedged; both transports hand it over as the exception message.
-        raise SpatchTimeout(
-            cve, kernel, -signal.SIGKILL, str(err), wall_timeout, wall=True
-        ) from err
 
     if zygote and degraded is None and returncode != 0 and not demanded:
         # A request that failed inside the server's child, with the server itself
@@ -264,19 +275,57 @@ def _run_spatch(
 
     if degraded is not None:
         log.warning('%s: %s', cve, degraded)
-        try:
-            returncode, stdout, stderr = _exec_spatch(cmd, env, wall_timeout)
-        except TimeoutError as err:
-            # The fallback answers to the same wall budget as the transport it
-            # replaces; classify it identically rather than letting a timeout
-            # escape as itself.
-            raise SpatchTimeout(
-                cve, kernel, -signal.SIGKILL, str(err), wall_timeout, wall=True
-            ) from err
+        returncode, stdout, stderr = attempt(cmd, False)
 
-    # The engine half is a question the classifier answers from stderr plus the
-    # exit code: handed a directory spatch drops the file it gave up on and
-    # still exits 0, so neither alone would do.
+    dropped = _engine_verdict(cve, kernel, returncode, stderr)
+    if dropped is None:
+        return stdout
+
+    truncated = _truncated(cve, kernel, returncode, stderr, dropped)
+    via_zygote = zygote and degraded is None
+    retry = truncation_retry(cmd, dropped, via_zygote, demanded)
+    if retry is None:
+        raise truncated
+    prefix, retry_zygote = retry
+    retry_cmd, how = cmd, []
+    if prefix is not None:
+        astcache_evict(prefix, [file for _exn, file in dropped])
+        retry_cmd = _without_cache_prefix(cmd)
+        how.append('without the AST cache')
+    if via_zygote and not retry_zygote:
+        how.append('as one exec')
+    log.warning(
+        '%s: spatch dropped %s mid-scan (%s); retrying %s',
+        cve,
+        ', '.join(truncated.files) or 'unnamed files',
+        ', '.join(truncated.kinds) or 'no exception named',
+        ' and '.join(how),
+    )
+    try:
+        returncode, stdout, stderr = attempt(retry_cmd, retry_zygote)
+    except spatch_zygote.ZygoteDied as err:
+        # Only a demanded zygote retries on the zygote, and it fails loudly.
+        raise SpatchError(cve, kernel, -1, str(err)) from err
+    dropped = _engine_verdict(cve, kernel, returncode, stderr)
+    if dropped is not None:
+        raise _truncated(cve, kernel, returncode, stderr, dropped, retried=True)
+    return stdout
+
+
+def _engine_verdict(
+    cve: str, kernel: str, returncode: int, stderr: str
+) -> list[tuple[str, str]] | None:
+    """The engine half: raise for a timeout or a failed run, else the files a
+    completed run dropped -- None when it scanned everything it was given.
+
+    A question the classifiers answer from stderr plus the exit code: handed a
+    directory, spatch drops the file it gave up on and still exits 0, so neither
+    alone would do. A timeout is checked first because it is the rule's fault and
+    takes the same shape; any other dropped file is the environment's, and is
+    returned rather than raised so the caller can decide on one rerun. Returning
+    stdout for it would answer "not vulnerable" for a file never looked at, and a
+    caller's cache would keep that.
+    """
     timed_out = parse_spatch_timeout(stderr, returncode)
     if timed_out is not None:
         raise SpatchTimeout(
@@ -287,21 +336,63 @@ def _run_spatch(
             SPATCH_TIMEOUT,
             [os.path.relpath(f, kernel) for f in timed_out],
         )
-    # A file spatch gave up on for any other reason is the same shape: exit 0,
-    # no findings for it. Returning stdout would answer "not vulnerable" for a
-    # file that was never looked at, and the caller's cache would keep that.
     dropped = parse_spatch_truncation(stderr) if returncode == 0 else None
-    if dropped is not None:
-        raise SpatchTruncated(
-            cve,
-            kernel,
-            returncode,
-            stderr,
-            [(exn, os.path.relpath(file, kernel)) for exn, file in dropped],
-        )
-    if returncode != 0:
+    if dropped is None and returncode != 0:
         raise SpatchError(cve, kernel, returncode, stderr)
-    return stdout
+    return dropped
+
+
+def _truncated(
+    cve: str,
+    kernel: str,
+    returncode: int,
+    stderr: str,
+    dropped: list[tuple[str, str]],
+    retried: bool = False,
+) -> SpatchTruncated:
+    relative = [(exn, os.path.relpath(file, kernel)) for exn, file in dropped]
+    return SpatchTruncated(cve, kernel, returncode, stderr, relative, retried)
+
+
+def truncation_retry(
+    cmd: list[str], dropped: list[tuple[str, str]], via_zygote: bool, demanded: bool
+) -> tuple[str | None, bool] | None:
+    """The one rerun a scan that dropped files gets, or None: (the AST cache to
+    evict the dropped files from and rerun without, or None to keep it; whether
+    the rerun goes on the zygote).
+
+    Two causes are worth a second run, because the rerun removes each:
+
+    - the AST cache. A torn or short entry raises in coccinelle's reader, which
+      neither re-parses nor evicts it, so every scan sharing the cache would drop
+      the file again. The caller evicts the named entries and the rerun goes
+      without --cache-prefix; the cache holds parses, never verdicts, so the
+      answer cannot differ.
+    - the transport. An inferred zygote's child starts on the server's long-lived
+      heap, so it is rerun as one exec on a fresh budget, as a failed child is.
+
+    Anything else -- an exec that lost a file to Out_of_memory, a parse that
+    fails outright -- would fail the same way twice, and is the answer. A
+    demanded zygote keeps its transport: asking for it and quietly getting an
+    exec is what `demanded` exists to prevent.
+    """
+    prefix = _cache_prefix(cmd) if is_cache_fault(dropped) else None
+    transport_fault = via_zygote and not demanded
+    if prefix is None and not transport_fault:
+        return None
+    return prefix, via_zygote and demanded
+
+
+def _cache_prefix(cmd: list[str]) -> str | None:
+    try:
+        return cmd[cmd.index('--cache-prefix') + 1]
+    except (ValueError, IndexError):
+        return None
+
+
+def _without_cache_prefix(cmd: list[str]) -> list[str]:
+    at = cmd.index('--cache-prefix')
+    return cmd[:at] + cmd[at + 2 :]
 
 
 def _exec_spatch(cmd: list[str], env: dict[str, str], wall_timeout: int) -> tuple[int, str, str]:

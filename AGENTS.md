@@ -45,7 +45,9 @@ That cost is now bounded, not just documented: `SPATCH_TIMEOUT` and
 `SPATCH_WALL_TIMEOUT` in `cvehound/__init__.py`, both failing the CVE with
 `SpatchTimeout`. `docs/WRITING_RULES.md` → "The rule exceeds its time budget" has the
 values, what each one counts, and why a fired `--timeout` has to be read off stderr
-rather than the exit code.
+rather than the exit code. A file spatch drops for any other reason takes the same shape
+(exit 0, an `EXN:` line) and raises `SpatchTruncated`: never treat a whole-tree scan's
+empty output as clean unless `_run_spatch` classified it.
 
 ### Metadata headers are test inputs, not documentation
 

@@ -29,6 +29,7 @@ from cvehound.exception import (
     SpatchError,
     SpatchNotFound,
     SpatchTimeout,
+    SpatchTruncated,
     UnsupportedVersion,
 )
 from cvehound.gitrepo import GitRepo
@@ -661,6 +662,19 @@ def error_record(cve: str, err: Exception) -> dict[str, Any]:
             'timeout': err.timeout,
             'wall': err.wall,
             'files': err.files,
+            'stderr': err.stderr_tail,
+        }
+    if isinstance(err, SpatchTruncated):
+        # Before SpatchError, its base: an incomplete scan is the environment's
+        # (a torn AST-cache entry, a full disk), and the record says which files
+        # went unscanned so the report cannot be read as clean for them.
+        logging.error(str(err))
+        return {
+            'error': 'truncated',
+            'returncode': err.returncode,
+            'files': err.files,
+            'exceptions': err.kinds,
+            'retried': err.retried,
             'stderr': err.stderr_tail,
         }
     if isinstance(err, SpatchError):

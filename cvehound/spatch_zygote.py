@@ -206,11 +206,12 @@ def run(
     env_entries = [f'{k}={v}' for k, v in env.items() if _zygote.env.get(k) != v]
     try:
         returncode = _zygote.request(capture_dir, env_entries, cmd[1:], deadline)
-        # The server O_CREATs both capture files before running the request, so
-        # on any reply a missing verdict stream is transport breakage; reading
-        # it as '' would classify a broken run as "not vulnerable".
+        # The request child O_CREATs both capture files before it runs anything,
+        # so on any reply a missing one is transport breakage. A missing stdout
+        # read as '' would classify a broken run as "not vulnerable"; a missing
+        # stderr would hide the EXN lines that say a file was dropped.
         stdout = _capture(capture_dir, 'zygote.stdout', required=True)
-        stderr = _capture(capture_dir, 'zygote.stderr')
+        stderr = _capture(capture_dir, 'zygote.stderr', required=True)
     except TimeoutError as err:
         _reset().kill()
         # The partial stderr capture is the only clue to where spatch wedged.

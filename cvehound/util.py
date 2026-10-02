@@ -150,19 +150,38 @@ def astcache_prune(astcache: str, limit: int) -> int:
     if total <= limit:
         return 0
     freed = 0
-    for _atime, size, value, depend in sorted(entries):
+    for _atime, size, value, _depend in sorted(entries):
         if total - freed <= limit:
             break
-        for path in (depend, value):
-            with contextlib.suppress(OSError):
-                os.unlink(path)
+        _drop_entry(value[: -len('.ast_raw')])
         freed += size
     return freed
+
+
+def _drop_entry(stem: str) -> None:
+    """Remove one entry, the dependency first: a reader racing the removal then
+    sees a miss and re-parses, never a dependency pointing at nothing."""
+    for path in (stem + '.depend_raw', stem + '.ast_raw'):
+        with contextlib.suppress(OSError):
+            os.unlink(path)
 
 
 def astcache_clear(astcache: str) -> int:
     """Drop every entry, leaving the directory. Returns bytes freed."""
     return astcache_prune(astcache, 0)
+
+
+def astcache_evict(astcache: str, files: list[str]) -> None:
+    """Drop the entries for these source files.
+
+    coccinelle names an entry after the path it parsed, absolute and with the
+    leading '/' dropped, under the prefix (cache_computation_robust2 in commons/
+    common.ml). A torn entry it neither re-parses nor removes, so it costs the
+    file on every scan sharing the cache until the source changes; this is the
+    eviction coccinelle does not do.
+    """
+    for file in files:
+        _drop_entry(os.path.join(astcache, os.path.abspath(file).lstrip('/')))
 
 
 def spatch_identity(spatch: str) -> str:
@@ -470,6 +489,23 @@ def parse_spatch_truncation(stderr: str) -> list[tuple[str, str]] | None:
     if _TRUNCATED_TRAILER in stderr and not pairs:
         return []
     return None
+
+
+# What reading (or writing) an AST-cache entry raises when the entry is the
+# problem rather than the source, as spatch 1.3.2 reports it: an empty entry
+# (End_of_file), a short one (input_value: truncated object), garbage
+# (input_value: bad object), and one that is missing, unreadable or a directory
+# while its dependency record is not, or a full disk on write (Sys_error). A
+# scan without --cache-prefix parses the source afresh and answers. Out_of_memory
+# is deliberately absent: a fresh exec under the same cap would only repeat it.
+# So is Invalid_argument: no bad entry raises it, and a parse that raises it
+# would fail the rerun too.
+_CACHE_FAULT = re.compile(r'input_value|End_of_file|Sys_error')
+
+
+def is_cache_fault(dropped: list[tuple[str, str]]) -> bool:
+    """Whether any dropped file was lost to the AST cache rather than to the parse."""
+    return any(_CACHE_FAULT.search(exn) for exn, _file in dropped)
 
 
 def parse_config(file: str) -> dict[str, Any]:

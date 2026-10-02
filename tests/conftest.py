@@ -375,6 +375,15 @@ def pytest_testnodedown(node, error):
         _result_cache.misses += stats[1]
 
 
+# spatch 1.3.2 on a torn AST-cache entry (cut to 100 bytes), shared by the
+# classifier and transport tests. Handed a directory, it names the file it
+# dropped and still exits 0.
+SPATCH_TRAILER = 'An error occurred when attempting to transform some files.\n'
+TORN_CACHE_STDERR = (
+    'EXN: Failure("input_value: truncated object") in /k/net/mptcp/protocol.c\n' + SPATCH_TRAILER
+)
+
+
 def write_tree(root, files):
     """Materialize a synthetic kernel tree: {relative path: file content}."""
     for rel, content in files.items():

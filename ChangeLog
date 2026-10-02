@@ -1,5 +1,23 @@
 # ChangeLog
 
+## Unreleased
+
+ - A whole-tree scan that drops a file is an error, no longer a clean verdict. Handed a
+   directory, spatch skips any file it raised on, prints `EXN: <exception> in <file>` and
+   still exits 0, which read as "not vulnerable" for a file never scanned; only timeouts
+   were caught. `SpatchTruncated` (`"error": "truncated"` in reports) names the files and
+   the exceptions. A torn AST-cache entry, the cause seen in practice, is evicted and the
+   scan rerun once without the cache
+ - spatch transport faults no longer become verdicts: a zygote that dies or whose request
+   fails is retried once as a plain exec; a missing stderr capture counts as transport
+   breakage like a missing stdout; output is decoded tolerantly on both transports, since
+   the kernel holds sources that are not UTF-8
+ - `--sandbox` grants the spatch payload where coccinelle looks for it -- `$COCCINELLE_HOME`,
+   the binary's directory, `<prefix>/lib/coccinelle` -- so an installed spatch (opam,
+   `make install`) no longer fails every rule with `standard.h: Permission denied`
+ - The AST cache is pruned dependency-first, so a scan racing the prune re-parses instead
+   of reading a dependency record whose value is gone
+
 ## 1.7.0 - Sep 09 2026
 
  - Native git support, as subcommands: `cvehound scan --rev REV...` scans tags, commits or
