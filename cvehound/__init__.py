@@ -10,7 +10,13 @@ from typing import Any
 
 from cvehound import condition, spatch_zygote
 from cvehound.config import Config
-from cvehound.exception import SpatchError, SpatchNotFound, SpatchTimeout, UnsupportedVersion
+from cvehound.exception import (
+    SpatchError,
+    SpatchNotFound,
+    SpatchTimeout,
+    SpatchTruncated,
+    UnsupportedVersion,
+)
 from cvehound.kbuild import KbuildParser
 from cvehound.util import (
     astcache_dir,
@@ -23,11 +29,17 @@ from cvehound.util import (
     killpg,
     parse_coccinelle_output,
     parse_spatch_timeout,
+    parse_spatch_truncation,
     pcre_grep,
     resolve_zygote,
 )
 
 __VERSION__ = '1.7.0'
+
+# The transport and engine verdicts get their own logger: they are rare and they
+# are the only record of why a scan was rerun, so a harness that silences the
+# per-check chatter on the root logger can still keep these.
+log = logging.getLogger('cvehound.spatch')
 
 RuleMetadata = dict[str, Any]
 
@@ -251,7 +263,7 @@ def _run_spatch(
         degraded = f'zygote request failed (rc {returncode}), retrying without it'
 
     if degraded is not None:
-        logging.warning('%s: %s', cve, degraded)
+        log.warning('%s: %s', cve, degraded)
         try:
             returncode, stdout, stderr = _exec_spatch(cmd, env, wall_timeout)
         except TimeoutError as err:
@@ -274,6 +286,18 @@ def _run_spatch(
             stderr,
             SPATCH_TIMEOUT,
             [os.path.relpath(f, kernel) for f in timed_out],
+        )
+    # A file spatch gave up on for any other reason is the same shape: exit 0,
+    # no findings for it. Returning stdout would answer "not vulnerable" for a
+    # file that was never looked at, and the caller's cache would keep that.
+    dropped = parse_spatch_truncation(stderr) if returncode == 0 else None
+    if dropped is not None:
+        raise SpatchTruncated(
+            cve,
+            kernel,
+            returncode,
+            stderr,
+            [(exn, os.path.relpath(file, kernel)) for exn, file in dropped],
         )
     if returncode != 0:
         raise SpatchError(cve, kernel, returncode, stderr)

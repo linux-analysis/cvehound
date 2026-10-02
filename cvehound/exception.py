@@ -113,6 +113,57 @@ class SpatchTimeout(SpatchError):
         return (self.__class__, super().__reduce__()[1] + (self.timeout, self.files, self.wall))
 
 
+class SpatchTruncated(SpatchError):
+    """spatch exited 0 having dropped files: the scan is incomplete, not clean.
+
+    Handed a directory, spatch catches any exception raised on one file, prints
+    `EXN: <exn> in <file>`, skips the file and still exits 0, so a file it never
+    matched against reads exactly like a file with nothing to report. Read as
+    "not vulnerable" that is the one wrong answer a check can give, and a cached
+    one is repeated by every later run that shares the cache.
+
+    Subclasses SpatchError so every caller that already treats an engine failure
+    as "no verdict" does so here too. The distinction worth drawing is that this
+    is the environment's, not the rule's -- a torn AST-cache entry, a full disk,
+    a memory cap -- where a SpatchTimeout is the rule's. `dropped` pairs each
+    exception with the file it cost; empty means spatch printed its trailer
+    without naming one, which is still not "complete". `retried` says the scan
+    had already been rerun once before giving this answer.
+    """
+
+    def __init__(
+        self,
+        cve: str,
+        kernel: str,
+        returncode: int,
+        stderr: str,
+        dropped: list[tuple[str, str]] | None = None,
+        retried: bool = False,
+    ) -> None:
+        self.dropped = [tuple(pair) for pair in dropped or []]
+        self.retried = retried
+        super().__init__(cve, kernel, returncode, stderr)
+
+    @property
+    def files(self) -> list[str]:
+        return sorted({file for _exn, file in self.dropped})
+
+    @property
+    def kinds(self) -> list[str]:
+        return sorted({exn for exn, _file in self.dropped})
+
+    def _summary(self) -> str:
+        count = len(self.files)
+        what = f'{count} file{"" if count == 1 else "s"}' if count else 'files it did not name'
+        where = f' ({", ".join(self.files)})' if self.files else ''
+        why = f': {", ".join(self.kinds)}' if self.kinds else ''
+        again = ' after one retry' if self.retried else ''
+        return f'{self.cve}: spatch dropped {what}{where} mid-scan in {self.kernel}{why}{again}'
+
+    def __reduce__(self) -> tuple[Any, tuple[Any, ...]]:
+        return (self.__class__, super().__reduce__()[1] + (self.dropped, self.retried))
+
+
 class SandboxError(Exception):
     """The sandbox could not be installed, or could not be trusted once it was.
 

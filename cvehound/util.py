@@ -438,6 +438,40 @@ def parse_spatch_timeout(stderr: str, returncode: int = 0) -> list[str] | None:
     return sorted(set(files))
 
 
+# The directory shape above is not peculiar to timeouts. Handed a directory,
+# spatch catches *any* exception raised while it works on one file, prints
+# `EXN: <exn> in <file>` (an ungated eprintf, so it survives --very-quiet), drops
+# the file, and at the end prints the trailer and still exits 0 -- the file it
+# never matched against reads exactly like a file with nothing to report. The
+# trailer is printed only when such a catch fired (patching_failed starts false
+# and nothing else sets it), so it alone already means "incomplete". The cause
+# seen in practice is a torn AST-cache entry, which coccinelle neither re-parses
+# nor evicts: `EXN: Failure("input_value: truncated object") in <file>` on every
+# scan sharing the cache until the source changes.
+_EXN_LINE = re.compile(r'^EXN: (?P<exn>.+) in (?P<file>.+)$', re.MULTILINE)
+_TRUNCATED_TRAILER = 'An error occurred when attempting to transform some files.'
+
+
+def parse_spatch_truncation(stderr: str) -> list[tuple[str, str]] | None:
+    """Classify a spatch run: None when it scanned everything it was given, else
+    the (exception, file) pairs it dropped.
+
+    Timeout lines are excluded -- they are parse_spatch_timeout's, which callers
+    consult first. The list is empty when spatch printed the trailer without
+    naming a file (its workers' stderr was lost, say); callers must treat
+    "empty" as "incomplete, files unknown", never as "complete". The exception
+    is matched greedily so its own text may say " in ": the file is what follows
+    the last one.
+    """
+    pairs = [(m['exn'], m['file']) for m in _EXN_LINE.finditer(stderr)]
+    dropped = [(exn, file) for exn, file in pairs if not _TIMEOUT_EXN.search(exn)]
+    if dropped:
+        return dropped
+    if _TRUNCATED_TRAILER in stderr and not pairs:
+        return []
+    return None
+
+
 def parse_config(file: str) -> dict[str, Any]:
     parser = ConfigParser()
     with open(file) as fh:
