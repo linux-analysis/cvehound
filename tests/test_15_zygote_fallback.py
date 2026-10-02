@@ -213,3 +213,34 @@ def test_a_failure_a_rerun_cannot_fix_is_the_answer(monkeypatch, cached_cmd, exe
 def test_truncation_retry_policy(dropped, cached, via_zygote, demanded, expected):
     cmd = ['spatch', *(['--cache-prefix', '/c'] if cached else []), '--cocci-file', 'r']
     assert cvehound.truncation_retry(cmd, dropped, via_zygote, demanded) == expected
+
+
+# --- the server's reply ------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ('reply', 'parsed'),
+    [
+        ('exit 0 stdout=633 stderr=193', (0, {'stdout': 633, 'stderr': 193})),
+        ('signal 11 name=SIGSEGV stdout=0 stderr=-1', (-11, {'stdout': 0, 'stderr': -1})),
+        # Outside the protocol, which the caller treats as a broken transport.
+        ('exit 0', None),  # the reply before v2
+        ('signal -10 stdout=0 stderr=0', None),  # OCaml's signal numbering, older still
+        ('exit 0 stdout=4', None),
+        ('bogus 1 stdout=0 stderr=0', None),
+        ('exit x stdout=0 stderr=0', None),
+    ],
+)
+def test_a_reply_is_a_returncode_and_capture_sizes(reply, parsed):
+    if parsed is None:
+        with pytest.raises(ValueError):
+            spatch_zygote.parse_reply(reply)
+    else:
+        assert spatch_zygote.parse_reply(reply) == parsed
+
+
+def test_a_capture_that_does_not_match_the_server_is_transport_breakage(tmp_path):
+    (tmp_path / 'zygote.stdout').write_text('hit\n')
+    spatch_zygote._check_capture_sizes(str(tmp_path), {'stdout': 4, 'stderr': -1})
+    with pytest.raises(spatch_zygote.ZygoteDied):
+        spatch_zygote._check_capture_sizes(str(tmp_path), {'stdout': 633, 'stderr': -1})

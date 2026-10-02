@@ -8,6 +8,16 @@
    were caught. `SpatchTruncated` (`"error": "truncated"` in reports) names the files and
    the exceptions. A torn AST-cache entry, the cause seen in practice, is evicted and the
    scan rerun once without the cache
+ - A spatch that answers `--features` is asked what it guarantees. A build advertising
+   `summary` must end every scan with one `SPATCH-SUMMARY` line, and a scan without it, or
+   one that counts a dropped or unreadable file, is truncated even when stdout is empty.
+   `SPATCH-DROP` lines name the files, including unreadable ones the `EXN:` lines never
+   showed
+ - The zygote client speaks only protocol v2, which needs cvehound-spatch 1.3.3.post1 (now
+   the minimum of the `spatch` extra). A reply carries the host's signal number, so a
+   child killed by SIGSEGV no longer reads as exit code 10, and the size of each capture,
+   which must match the file. An older zygote fails its first request and the scan falls
+   back to one spatch per rule
  - spatch transport faults no longer become verdicts: a zygote that dies or whose request
    fails is retried once as a plain exec; a missing stderr capture counts as transport
    breakage like a missing stdout; output is decoded tolerantly on both transports, since

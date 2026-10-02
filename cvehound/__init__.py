@@ -30,10 +30,13 @@ from cvehound.util import (
     is_cache_fault,
     killpg,
     parse_coccinelle_output,
+    parse_spatch_drops,
+    parse_spatch_summary,
     parse_spatch_timeout,
     parse_spatch_truncation,
     pcre_grep,
     resolve_zygote,
+    spatch_features,
 )
 
 __VERSION__ = '1.7.0'
@@ -197,6 +200,7 @@ def _run_spatch(
     workdir: str,
     zygote: bool = False,
     demanded: bool = False,
+    features: frozenset[str] = frozenset(),
 ) -> str:
     """Run spatch under both budgets and hand back its stdout, or raise.
 
@@ -277,7 +281,7 @@ def _run_spatch(
         log.warning('%s: %s', cve, degraded)
         returncode, stdout, stderr = attempt(cmd, False)
 
-    dropped = _engine_verdict(cve, kernel, returncode, stderr)
+    dropped = _engine_verdict(cve, kernel, returncode, stderr, features)
     if dropped is None:
         return stdout
 
@@ -306,14 +310,18 @@ def _run_spatch(
     except spatch_zygote.ZygoteDied as err:
         # Only a demanded zygote retries on the zygote, and it fails loudly.
         raise SpatchError(cve, kernel, -1, str(err)) from err
-    dropped = _engine_verdict(cve, kernel, returncode, stderr)
+    dropped = _engine_verdict(cve, kernel, returncode, stderr, features)
     if dropped is not None:
         raise _truncated(cve, kernel, returncode, stderr, dropped, retried=True)
     return stdout
 
 
 def _engine_verdict(
-    cve: str, kernel: str, returncode: int, stderr: str
+    cve: str,
+    kernel: str,
+    returncode: int,
+    stderr: str,
+    features: frozenset[str],
 ) -> list[tuple[str, str]] | None:
     """The engine half: raise for a timeout or a failed run, else the files a
     completed run dropped -- None when it scanned everything it was given.
@@ -336,10 +344,21 @@ def _engine_verdict(
             SPATCH_TIMEOUT,
             [os.path.relpath(f, kernel) for f in timed_out],
         )
-    dropped = parse_spatch_truncation(stderr) if returncode == 0 else None
-    if dropped is None and returncode != 0:
-        raise SpatchError(cve, kernel, returncode, stderr)
-    return dropped
+    if returncode == 0:
+        if 'summary' not in features:
+            return parse_spatch_truncation(stderr)
+        # A build that ends every scan with a summary has said whether it
+        # finished, so its absence is the answer "it did not" -- the shape an
+        # empty stdout cannot distinguish from a clean tree (a child that
+        # exited 0 without scanning, a capture cut short).
+        counts = parse_spatch_summary(stderr)
+        if counts is None:
+            log.warning('%s: spatch printed no SPATCH-SUMMARY; the scan did not finish', cve)
+            return []
+        if counts.get('dropped') or counts.get('unreadable'):
+            return parse_spatch_drops(stderr) or parse_spatch_truncation(stderr) or []
+        return None
+    raise SpatchError(cve, kernel, returncode, stderr)
 
 
 def _truncated(
@@ -515,6 +534,9 @@ class CVEhound:
         # about the cache directory.
         self.zygote_mode = zygote = zygote or 'auto'
         self.zygote = resolve_zygote(zygote, self.spatch)
+        # What the binary guarantees beyond stock spatch, such as whether a scan
+        # must end with a summary.
+        self.features = spatch_features(self.spatch)
         if ast_cache is None:
             ast_cache = os.environ.get('CVEHOUND_SPATCH_ASTCACHE')
         self.astcache = astcache_dir(ast_cache, self.spatch)
@@ -680,6 +702,7 @@ class CVEhound:
                     workdir=tmpdir,
                     zygote=self.zygote,
                     demanded=self.zygote_mode == 'on',
+                    features=self.features,
                 ).strip()
             # Rules report by starring lines: a match is a unified diff of the
             # starred lines on stdout, silence means not vulnerable. The parsed

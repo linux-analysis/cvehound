@@ -11,7 +11,12 @@ child to files in the caller-owned capture directory, so they survive a
 wall-timeout SIGKILL, unlike a pipe. Frame layout (u32 big-endian lengths):
 request = u32 field count, then per field u32 length + bytes, the fields being
 capture dir, decimal env-entry count, env entries, spatch argv tail;
-reply = u32 length + "exit <n>" or "signal <n>".
+reply = u32 length + "exit <n> stdout=<bytes> stderr=<bytes>" or
+"signal <n> name=<SIGNAME> stdout=<bytes> stderr=<bytes>", n being the host's
+signal number and the sizes what the child left in each capture (-1 for one it
+never created). That is protocol v2, which every request asks for with the env
+entry COCCI_ZYGOTE_PROTO=2; a server that answers in the older format fails
+its first request and counts as a build without --zygote.
 
 The OCaml runtime reads OCAMLRUNPARAM once at server start, so the first
 request's environment becomes the server's; each later request carries only the
@@ -32,6 +37,24 @@ from typing import IO
 
 from cvehound.exception import SpatchError
 from cvehound.util import killpg
+
+V2_ENTRY = 'COCCI_ZYGOTE_PROTO=2'
+
+
+def parse_reply(reply: str) -> tuple[int, dict[str, int]]:
+    """A server reply as (subprocess returncode, capture sizes): the exit code,
+    or minus the number of the signal that killed the child, and the bytes it
+    left in each capture. ValueError on anything else, which the caller treats
+    as a broken protocol."""
+    kind, num, *rest = reply.split(' ')
+    fields = dict(field.split('=', 1) for field in rest)
+    code = int(num)
+    if kind not in ('exit', 'signal') or (kind == 'signal' and code <= 0):
+        raise ValueError(reply)
+    if not {'stdout', 'stderr'} <= fields.keys():
+        raise ValueError(reply)
+    sizes = {name: int(fields[name]) for name in ('stdout', 'stderr')}
+    return (code if kind == 'exit' else -code), sizes
 
 
 class ZygoteDied(Exception):
@@ -69,7 +92,7 @@ class _Zygote:
 
     def request(
         self, capture_dir: str, env_entries: list[str], argv_tail: list[str], deadline: float | None
-    ) -> int:
+    ) -> tuple[int, dict[str, int]]:
         fields = [capture_dir.encode(), str(len(env_entries)).encode()]
         fields += [e.encode() for e in env_entries]
         fields += [a.encode() for a in argv_tail]
@@ -84,14 +107,10 @@ class _Zygote:
             raise self._died(str(err)) from err
         (length,) = struct.unpack('>I', self._read(4, deadline))
         reply = self._read(length, deadline).decode('utf-8', errors='replace')
-        kind, _, num = reply.partition(' ')
-        if kind in ('exit', 'signal'):
-            try:
-                code = int(num)
-            except ValueError as err:
-                raise self._died(f'bad reply: {reply!r}') from err
-            return code if kind == 'exit' else -code
-        raise self._died(f'bad reply: {reply!r}')
+        try:
+            return parse_reply(reply)
+        except ValueError as err:
+            raise self._died(f'bad reply: {reply!r}') from err
 
     def _read(self, n: int, deadline: float | None) -> bytes:
         assert self.proc.stdout is not None
@@ -175,7 +194,11 @@ def _close_zygote() -> None:
 
 
 def run(
-    cmd: list[str], env: dict[str, str], capture_dir: str, wall_timeout: int, degrade: bool = True
+    cmd: list[str],
+    env: dict[str, str],
+    capture_dir: str,
+    wall_timeout: int,
+    degrade: bool = True,
 ) -> tuple[int, str, str]:
     """Run one spatch request through the per-process zygote.
 
@@ -203,9 +226,11 @@ def run(
     if _zygote is None:
         _zygote = _Zygote(cmd[0], env)
     deadline = time.monotonic() + wall_timeout if wall_timeout else None
-    env_entries = [f'{k}={v}' for k, v in env.items() if _zygote.env.get(k) != v]
+    # The server strips V2_ENTRY, so the child never sees it.
+    env_entries = [f'{k}={v}' for k, v in env.items() if _zygote.env.get(k) != v] + [V2_ENTRY]
     try:
-        returncode = _zygote.request(capture_dir, env_entries, cmd[1:], deadline)
+        returncode, sizes = _zygote.request(capture_dir, env_entries, cmd[1:], deadline)
+        _check_capture_sizes(capture_dir, sizes)
         # The request child O_CREATs both capture files before it runs anything,
         # so on any reply a missing one is transport breakage. A missing stdout
         # read as '' would classify a broken run as "not vulnerable"; a missing
@@ -242,6 +267,17 @@ def _reset() -> _Zygote:
     server, _zygote = _zygote, None
     assert server is not None
     return server
+
+
+def _check_capture_sizes(capture_dir: str, sizes: dict[str, int]) -> None:
+    """The server measures the captures after reaping the child, so its sizes
+    are what the child wrote; a capture that differs was cut short or is not
+    this request's, and reading it as the answer is the transport's error."""
+    for name, expected in sizes.items():
+        path = os.path.join(capture_dir, f'zygote.{name}')
+        actual = os.path.getsize(path) if os.path.exists(path) else -1
+        if actual != expected:
+            raise ZygoteDied(f'zygote.{name} is {actual} bytes, the server measured {expected}')
 
 
 def _capture(capture_dir: str, name: str, required: bool = False) -> str:

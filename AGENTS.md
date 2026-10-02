@@ -48,6 +48,8 @@ values, what each one counts, and why a fired `--timeout` has to be read off std
 rather than the exit code. A file spatch drops for any other reason takes the same shape
 (exit 0, an `EXN:` line) and raises `SpatchTruncated`: never treat a whole-tree scan's
 empty output as clean unless `_run_spatch` classified it.
+On a build whose `--features` lists `summary`, the classification requires the
+`SPATCH-SUMMARY` line; its absence is a truncation, never a clean scan.
 
 ### Metadata headers are test inputs, not documentation
 

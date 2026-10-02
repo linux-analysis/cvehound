@@ -30,13 +30,11 @@ dependencies = ["pyyaml"]
 # not exist. One requirement rather than one per platform, so the version floor
 # below stays stated once.
 [project.optional-dependencies]
-# >=1.3.2.post3 is the first build published for macOS arm64. The floor that
-# matters for behaviour is still post2, the first that can run spatch as a warm
-# server and says so in FEATURES, which is what --zygote=auto reads; an older
-# wheel still works, it just advertises nothing and keeps one process per rule.
-# So this raises what a fresh install gets, not what is required to run.
+# >=1.3.3.post1 is the first build whose zygote speaks protocol v2, the only one
+# cvehound's client reads. An older wheel still works: its zygote fails the
+# first request and the scan falls back to one process per rule.
 spatch = [
-    "cvehound-spatch>=1.3.2.post3; (sys_platform == 'linux' and platform_machine in 'x86_64 aarch64') or (sys_platform == 'darwin' and platform_machine == 'arm64')",
+    "cvehound-spatch>=1.3.3.post1; (sys_platform == 'linux' and platform_machine in 'x86_64 aarch64') or (sys_platform == 'darwin' and platform_machine == 'arm64')",
 ]
 # cvehound.oracle is shipped API: BlobMaterializer works over a GitPython Repo
 # and ResultCache.compact() takes a cross-process file lock. The scanner itself

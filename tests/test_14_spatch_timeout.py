@@ -154,26 +154,51 @@ def test_truncation_survives_the_pool_boundary():
 
 # --- _run_spatch hands back only a scan that finished ------------------------
 
+SUMMARY = frozenset({'summary'})
+CLEAN = 'SPATCH-SUMMARY groups=2 handled=1 skipped=1 dropped=0 timeouts=0 unreadable=0\n'
+LOST = (
+    'SPATCH-DROP kind=unreadable reason="prefilter" file=/k/b.c\n'
+    'SPATCH-DROP kind=exn reason="Failure(\\"input_value: truncated object\\")" file=/k/a.c\n'
+    'SPATCH-SUMMARY groups=2 handled=0 skipped=0 dropped=2 timeouts=0 unreadable=1\n'
+)
+
 
 @pytest.mark.parametrize(
-    ('returncode', 'stderr', 'raised', 'files'),
+    ('returncode', 'stderr', 'features', 'raised', 'files'),
     [
-        (0, 'init_defs_builtins: /usr/share/coccinelle/standard.h\n', None, None),
-        (0, TORN_CACHE_STDERR, SpatchTruncated, ['net/mptcp/protocol.c']),
-        (0, SPATCH_TRAILER, SpatchTruncated, []),
-        (0, DIRECTORY_STDERR, SpatchTimeout, ['drivers/a.c', 'drivers/b.c']),
+        (0, 'init_defs_builtins: /usr/share/coccinelle/standard.h\n', frozenset(), None, None),
+        (0, TORN_CACHE_STDERR, frozenset(), SpatchTruncated, ['net/mptcp/protocol.c']),
+        (0, SPATCH_TRAILER, frozenset(), SpatchTruncated, []),
+        (0, DIRECTORY_STDERR, frozenset(), SpatchTimeout, ['drivers/a.c', 'drivers/b.c']),
         # A non-zero exit is the engine's own failure whatever it printed first.
-        (2, TORN_CACHE_STDERR, SpatchError, None),
+        (2, TORN_CACHE_STDERR, frozenset(), SpatchError, None),
+        # A build that ends every scan with a summary must say it finished, once.
+        (0, CLEAN, SUMMARY, None, None),
+        (0, '', SUMMARY, SpatchTruncated, []),
+        (0, CLEAN + CLEAN, SUMMARY, SpatchTruncated, []),
+        (0, LOST, SUMMARY, SpatchTruncated, ['a.c', 'b.c']),
     ],
-    ids=['complete', 'torn-cache', 'trailer-only', 'timeout-wins', 'nonzero-is-an-error'],
+    ids=[
+        'complete',
+        'torn-cache',
+        'trailer-only',
+        'timeout-wins',
+        'nonzero-is-an-error',
+        'summary',
+        'no-summary',
+        'two-summaries',
+        'summary-counts-drops',
+    ],
 )
-def test_run_spatch_returns_only_a_complete_scan(monkeypatch, returncode, stderr, raised, files):
+def test_run_spatch_returns_only_a_complete_scan(
+    monkeypatch, returncode, stderr, features, raised, files
+):
     monkeypatch.setattr(
         cvehound, '_exec_spatch', lambda cmd, env, wall: (returncode, 'hits', stderr)
     )
 
     def run():
-        return cvehound._run_spatch('CVE-1', '/k', ['spatch'], 60, '/tmp')
+        return cvehound._run_spatch('CVE-1', '/k', ['spatch'], 60, '/tmp', features=features)
 
     if raised is None:
         assert run() == 'hits'
@@ -254,7 +279,8 @@ def slow_hound(hound, slow_tree):
 
 # The hinted-files shape depends on the build: stock spatch dies with the
 # uncaught exception (exit 2); builds carrying the exit-124 patch (the zygote
-# branch) report the coreutils-style timeout code instead.
+# branch) report the coreutils-style timeout code instead. A directory scan
+# exits 0.
 @pytest.mark.parametrize(
     ('all_files', 'returncodes'),
     [(False, {2, 124}), (True, {0})],
@@ -368,6 +394,10 @@ def test_a_torn_cache_entry_is_healed_not_read_as_silence(torn_hound, caplog, jo
     entry = tear(torn_hound.astcache)
     with caplog.at_level(logging.WARNING, logger='cvehound.spatch'):
         assert torn_hound.check_cve(UAF_CVE, True, jobs=jobs)
-    assert 'dropped a.c mid-scan' in caplog.text and 'input_value' in caplog.text
-    assert 'without the AST cache' in caplog.text
-    assert not os.path.exists(entry), 'the torn entry must be evicted, or every scan pays again'
+    if 'cache-selfheal' in torn_hound.features:
+        # The engine re-parses and rewrites the entry itself.
+        assert os.path.getsize(entry) > 100, 'a self-healing build must rewrite the entry'
+    else:
+        assert 'dropped a.c mid-scan' in caplog.text and 'input_value' in caplog.text
+        assert 'without the AST cache' in caplog.text
+        assert not os.path.exists(entry), 'the torn entry must be evicted, or every scan pays again'

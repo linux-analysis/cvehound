@@ -67,18 +67,36 @@ def bundled_spatch() -> str | None:
 def spatch_features(spatch: str) -> frozenset[str]:
     """What this spatch can do beyond the stock command line.
 
-    Only the bundled build can answer: its wheel records what make_wheel.py
-    probed the binary for. Nothing else can be asked, because --zygote is
-    dispatched before spatch parses argv (so it is in no --help output) and the
-    version banner is identical with and without it. A wheel packed before
-    FEATURES existed declares nothing, which is the correct answer for it.
+    The bundled build answers from its wheel, which records what make_wheel.py
+    probed the binary for. Any other binary is asked `spatch --features`: a
+    build that knows the option lists its tokens one per line, and one that
+    does not rejects it with exit 2 -- the answer "nothing". --zygote itself is
+    dispatched before spatch parses argv and the version banner says nothing of
+    it, so before --features only the wheel could answer.
     """
     bundled = bundled_spatch()
-    if bundled is None or os.path.realpath(spatch) != bundled:
-        return frozenset()
-    import cvehound_spatch  # ty: ignore[unresolved-import]  # optional sidecar package
+    if bundled is not None and os.path.realpath(spatch) == bundled:
+        import cvehound_spatch  # ty: ignore[unresolved-import]  # optional sidecar package
 
-    return frozenset(getattr(cvehound_spatch, 'FEATURES', frozenset()))
+        return frozenset(getattr(cvehound_spatch, 'FEATURES', frozenset()))
+    return _probe_features(os.path.realpath(spatch))
+
+
+@functools.cache
+def _probe_features(spatch: str) -> frozenset[str]:
+    try:
+        run = subprocess.run(
+            [spatch, '--features'],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            errors='replace',
+            timeout=60,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return frozenset()
+    return frozenset(run.stdout.split()) if run.returncode == 0 else frozenset()
 
 
 def resolve_zygote(mode: str, spatch: str) -> bool:
@@ -501,6 +519,47 @@ def parse_spatch_truncation(stderr: str) -> list[tuple[str, str]] | None:
 # So is Invalid_argument: no bad entry raises it, and a parse that raises it
 # would fail the rerun too.
 _CACHE_FAULT = re.compile(r'input_value|End_of_file|Sys_error')
+
+
+# Builds advertising 'summary' end every scan with one line saying what it did,
+# and name every file they lost (fork commit "summary: every scan ends with
+# SPATCH-SUMMARY"); unlike the EXN line, a SPATCH-DROP also covers a file that
+# could not be read, which spatch otherwise skips without a word under
+# --very-quiet.
+_SUMMARY_LINE = re.compile(r'^SPATCH-SUMMARY (.*)$', re.MULTILINE)
+_DROP_LINE = re.compile(
+    r'^SPATCH-DROP kind=(?P<kind>\w+) reason="(?P<reason>(?:[^"\\]|\\.)*)" file=(?P<file>.*)$',
+    re.MULTILINE,
+)
+
+
+def parse_spatch_summary(stderr: str) -> dict[str, int] | None:
+    """The run's SPATCH-SUMMARY as counts, or None when there is not exactly one.
+
+    On a build that prints it, None means the run did not finish the way a scan
+    finishes -- never "nothing to report".
+    """
+    lines = _SUMMARY_LINE.findall(stderr)
+    if len(lines) != 1:
+        return None
+    counts = {}
+    for pair in lines[0].split():
+        key, _, value = pair.partition('=')
+        if value.isdigit():
+            counts[key] = int(value)
+    return counts
+
+
+def parse_spatch_drops(stderr: str) -> list[tuple[str, str]]:
+    """The (cause, file) pairs a run's SPATCH-DROP lines name, timeouts excluded."""
+    drops = []
+    for m in _DROP_LINE.finditer(stderr):
+        if m['kind'] == 'timeout':
+            continue
+        reason = m['reason'].replace('\\"', '"').replace('\\\\', '\\')
+        cause = reason if m['kind'] == 'exn' else f'{m["kind"]} ({reason})'
+        drops.append((cause, m['file']))
+    return drops
 
 
 def is_cache_fault(dropped: list[tuple[str, str]]) -> bool:
