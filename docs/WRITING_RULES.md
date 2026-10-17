@@ -1607,7 +1607,7 @@ checking.
 
 1. **Coccinelle Documentation**: https://coccinelle.gitlabpages.inria.fr/website/docs/
 2. **Coccinelle Mailing List**: cocci@inria.fr
-3. **CVEhound Issues**: https://github.com/evdenis/cvehound/issues
+3. **CVEhound Issues**: https://github.com/linux-analysis/cvehound/issues
 4. **Existing Rules**: Study similar CVE rules in `cvehound/cve/`
 5. **Test Suite**: See `tests/` for working examples
 
@@ -1625,7 +1625,7 @@ checking.
 - [LWN Kernel Coverage](https://lwn.net/Kernel/)
 
 ### CVEhound Resources
-- [CVEhound Repository](https://github.com/evdenis/cvehound)
+- [CVEhound Repository](https://github.com/linux-analysis/cvehound)
 - [Existing Rules](../cvehound/cve/)
 - [Rule Template](../contrib/template.cocci)
 - [Blank Template](../contrib/blank.cocci)

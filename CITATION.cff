@@ -5,4 +5,4 @@ authors:
     given-names: "Denis"
     orcid: "https://orcid.org/0000-0002-9916-056X"
 title: "CVEhound"
-url: "https://github.com/evdenis/cvehound"
+url: "https://github.com/linux-analysis/cvehound"

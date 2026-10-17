@@ -129,7 +129,7 @@ uv run pytest --cve=CVE-2020-12912
 If no switch is selected, add `--switch=<switch> --set-switch` to `opam env`.
 
 `uv sync --extra spatch` sidesteps all of that: it pulls the
-[cvehound-spatch](https://github.com/evdenis/cvehound-spatch) wheel into the venv, and
+[cvehound-spatch](https://github.com/linux-analysis/cvehound-spatch) wheel into the venv, and
 `find_spatch()` prefers it over `PATH`. That binary is built without Python scripting, so
 a rule that reintroduces `@script:python@` fails there with exit 255 — which is the point.
 

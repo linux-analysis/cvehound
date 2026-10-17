@@ -1,4 +1,4 @@
-[![GitHub Actions status](https://github.com/evdenis/cvehound/workflows/test/badge.svg)](https://github.com/evdenis/cvehound/actions?query=workflow%3Atest)
+[![GitHub Actions status](https://github.com/linux-analysis/cvehound/workflows/test/badge.svg)](https://github.com/linux-analysis/cvehound/actions?query=workflow%3Atest)
 [![Supported Versions of Python](https://img.shields.io/pypi/pyversions/cvehound.svg)](https://pypi.org/project/cvehound)
 [![PyPI package version](https://img.shields.io/pypi/v/cvehound.svg)](https://pypi.org/project/cvehound)
 
@@ -41,7 +41,7 @@ code patterns of known CVEs and missing fixes for them.
  - Similar to CVE-2021-28660 [fix in rtl8723bs driver](https://lore.kernel.org/all/20220520035730.5533-1-efremov@linux.com/)
  - Similar to CVE-2022-26490 [fix](https://lore.kernel.org/all/20221122004246.4186422-4-mfaltesek@google.com/) in [st-nci driver](https://lore.kernel.org/all/fc85ff14-70d6-0c3e-247d-eda2284a5f6b@oracle.com/)
  - Security [regression CVE-2020-10781](https://lkml.org/lkml/2023/4/17/744)
- - See [`missing_backports` in the tests](https://github.com/evdenis/cvehound/blob/main/tests/conftest.py) for more examples
+ - See [`missing_backports` in the tests](https://github.com/linux-analysis/cvehound/blob/main/tests/conftest.py) for more examples
 
 ## Installation
 
@@ -50,7 +50,7 @@ $ python3 -m pip install --user 'cvehound[spatch]'
 ```
 
 That brings a prebuilt, tailored `spatch` along with the tool
-([cvehound-spatch](https://github.com/evdenis/cvehound-spatch)), so there is
+([cvehound-spatch](https://github.com/linux-analysis/cvehound-spatch)), so there is
 nothing else to install and no coccinelle build to keep in step. It is used
 automatically unless you name another `spatch` explicitly.
 
@@ -257,7 +257,7 @@ environment management.
 $ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 # Clone and create the dev environment
-$ git clone https://github.com/evdenis/cvehound.git
+$ git clone https://github.com/linux-analysis/cvehound.git
 $ cd cvehound
 $ uv sync                         # creates .venv and installs dev deps
 

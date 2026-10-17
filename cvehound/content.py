@@ -45,7 +45,7 @@ from typing import Any
 # not execute -- not only a layout change.  2: rules no longer declare
 # "virtual detect", which a client still passing -D detect rejects with exit 255.
 FORMAT_VERSION = 2
-DEFAULT_BASE = 'https://github.com/evdenis/cvehound/releases/download/content-latest'
+DEFAULT_BASE = 'https://github.com/linux-analysis/cvehound/releases/download/content-latest'
 MANIFEST_NAME = 'manifest.json'
 METADATA_NAME = 'data/kernel_cves.json.gz'
 CONTENT_ID_NAME = 'data/content_id'

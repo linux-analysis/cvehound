@@ -48,7 +48,7 @@ cvehound = "cvehound.__main__:main"
 cvehound_update_metadata = "cvehound.scripts.update_metadata:main"
 
 [project.urls]
-Homepage = "http://github.com/evdenis/cvehound"
+Homepage = "https://github.com/linux-analysis/cvehound"
 
 [dependency-groups]
 dev = [
