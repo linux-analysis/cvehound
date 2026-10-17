@@ -19,12 +19,12 @@ import pickle
 import subprocess
 
 import pytest
-from conftest import SPATCH_TRAILER, TORN_CACHE_STDERR, write_tree
+from conftest import NAMED_TORN_STDERR, SPATCH_TRAILER, TORN_CACHE_STDERR, write_tree
 
 import cvehound
 from cvehound.exception import SpatchError, SpatchTimeout, SpatchTruncated
 from cvehound.oracle import hound_at
-from cvehound.util import parse_spatch_timeout, parse_spatch_truncation
+from cvehound.util import parse_spatch_fatal, parse_spatch_timeout, parse_spatch_truncation
 
 # Captured verbatim from spatch 1.3.2 under --very-quiet. One shape per way
 # cvehound can invoke it; see the comment above parse_spatch_timeout().
@@ -139,6 +139,35 @@ def test_wall_and_engine_budgets_read_differently():
 )
 def test_a_dropped_file_is_a_truncation(stderr, dropped):
     assert parse_spatch_truncation(stderr) == dropped
+
+
+# The other shapes spatch 1.3.2 prints handed the file by name, with its
+# AST-cache entry emptied, or cut short under -j 2: no EXN line, and no file named.
+NAMED_EMPTY_STDERR = 'exn while in timeout_function\nFatal error: exception End_of_file\n'
+NAMED_PARMAP_STDERR = (
+    'exception on /t/par_r_1: (Object #-3 (), "Aborting computation due to exception(s)'
+    ' raised in the workers")\n'
+    'exn while in timeout_function\n'
+    '[Parmap]: error at index j=0 in (0,0), chunksize=1 of a total of 1 got exception'
+    ' Failure("input_value: truncated object") on core 0 \n'
+    '\n'
+    'Aborting computation due to exception(s) raised in the workers\n'
+)
+
+
+@pytest.mark.parametrize(
+    ('stderr', 'expected'),
+    [
+        (NAMED_TORN_STDERR, ['input_value: truncated object']),
+        (NAMED_EMPTY_STDERR, ['End_of_file']),
+        (NAMED_PARMAP_STDERR, ['Failure("input_value: truncated object")']),
+        ('', []),
+    ],
+    ids=['short', 'empty', 'parmap', 'nothing'],
+)
+def test_a_named_file_run_names_the_exception_it_died_of(stderr, expected):
+    assert parse_spatch_fatal(stderr) == expected
+    assert parse_spatch_truncation(stderr) is None
 
 
 def test_truncation_survives_the_pool_boundary():
@@ -381,19 +410,22 @@ def tear(astcache: str) -> str:
     return entry
 
 
+@pytest.mark.parametrize('all_files', [True, False], ids=['all-files', 'named-files'])
 @pytest.mark.parametrize('jobs', [1, 2])
-def test_a_torn_cache_entry_is_healed_not_read_as_silence(torn_hound, caplog, jobs):
+def test_a_torn_cache_entry_is_healed_not_read_as_silence(torn_hound, caplog, jobs, all_files):
     """A torn AST-cache entry, end to end.
 
-    Before: `EXN: Failure("input_value: truncated object") in a.c`, exit 0, no
-    findings -- "not vulnerable" for a file never scanned, on every scan sharing
-    the cache. jobs=2 pins that parmap replays its workers' stderr, where the EXN
-    line is printed, before the parent's trailer.
+    Before, handed the directory: `EXN: Failure("input_value: truncated object")
+    in a.c`, exit 0, no findings -- "not vulnerable" for a file never scanned, on
+    every scan sharing the cache. jobs=2 pins that parmap replays its workers'
+    stderr, where the EXN line is printed, before the parent's trailer. Handed
+    the file by name, the run died instead, naming no file, and so failed the
+    CVE on every scan sharing the cache.
     """
-    assert torn_hound.check_cve(UAF_CVE, True, jobs=jobs)
+    assert torn_hound.check_cve(UAF_CVE, all_files, jobs=jobs)
     entry = tear(torn_hound.astcache)
     with caplog.at_level(logging.WARNING, logger='cvehound.spatch'):
-        assert torn_hound.check_cve(UAF_CVE, True, jobs=jobs)
+        assert torn_hound.check_cve(UAF_CVE, all_files, jobs=jobs)
     if 'cache-selfheal' in torn_hound.features:
         # The engine re-parses and rewrites the entry itself.
         assert os.path.getsize(entry) > 100, 'a self-healing build must rewrite the entry'

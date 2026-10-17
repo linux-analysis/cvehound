@@ -8,6 +8,10 @@
    were caught. `SpatchTruncated` (`"error": "truncated"` in reports) names the files and
    the exceptions. A torn AST-cache entry, the cause seen in practice, is evicted and the
    scan rerun once without the cache
+ - A scan of named files that dies on a torn AST-cache entry is rerun once without the
+   cache, after evicting the entries of every file it was given; stock spatch exits
+   non-zero there without naming the file, which used to fail the CVE on every run until
+   `--cache-clear`
  - A spatch that answers `--features` is asked what it guarantees. A build advertising
    `summary` must end every scan with one `SPATCH-SUMMARY` line, and a scan without it, or
    one that counts a dropped or unreadable file, is truncated even when stdout is empty.

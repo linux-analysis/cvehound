@@ -509,6 +509,28 @@ def parse_spatch_truncation(stderr: str) -> list[tuple[str, str]] | None:
     return None
 
 
+# Handed files by name instead, spatch has no per-file catch: the first exception
+# ends the run with a non-zero exit, and what it prints names the exception but
+# never the file. Captured from spatch 1.3.2 on a torn AST-cache entry, one shape
+# per way it can die:
+#   Fatal error: exception End_of_file                      uncaught, exit 2
+#   input_value: truncated object                           a Failure's text, exit 255
+#   [Parmap]: ... got exception End_of_file on core 0       a -j>1 worker, exit 255
+# The parmap line ends in a space.
+_FATAL_EXN = re.compile(
+    r'^(?:Fatal error: exception (?P<uncaught>.+)'
+    r'|.*\bgot exception (?P<worker>.+) on core \d+[ \t]*'
+    r'|(?P<failure>input_value: .+))$',
+    re.MULTILINE,
+)
+
+
+def parse_spatch_fatal(stderr: str) -> list[str]:
+    """The exceptions a spatch run that exited non-zero names as the cause; []
+    when it names none."""
+    return [m['uncaught'] or m['worker'] or m['failure'] for m in _FATAL_EXN.finditer(stderr)]
+
+
 # What reading (or writing) an AST-cache entry raises when the entry is the
 # problem rather than the source, as spatch 1.3.2 reports it: an empty entry
 # (End_of_file), a short one (input_value: truncated object), garbage

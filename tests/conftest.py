@@ -377,11 +377,13 @@ def pytest_testnodedown(node, error):
 
 # spatch 1.3.2 on a torn AST-cache entry (cut to 100 bytes), shared by the
 # classifier and transport tests. Handed a directory, it names the file it
-# dropped and still exits 0.
+# dropped and still exits 0; handed the file by name, it exits 255 and names no
+# file.
 SPATCH_TRAILER = 'An error occurred when attempting to transform some files.\n'
 TORN_CACHE_STDERR = (
     'EXN: Failure("input_value: truncated object") in /k/net/mptcp/protocol.c\n' + SPATCH_TRAILER
 )
+NAMED_TORN_STDERR = 'exn while in timeout_function\ninput_value: truncated object\n'
 
 
 def write_tree(root, files):

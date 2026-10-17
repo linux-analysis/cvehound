@@ -31,6 +31,7 @@ from cvehound.util import (
     killpg,
     parse_coccinelle_output,
     parse_spatch_drops,
+    parse_spatch_fatal,
     parse_spatch_summary,
     parse_spatch_timeout,
     parse_spatch_truncation,
@@ -281,7 +282,7 @@ def _run_spatch(
         log.warning('%s: %s', cve, degraded)
         returncode, stdout, stderr = attempt(cmd, False)
 
-    dropped = _engine_verdict(cve, kernel, returncode, stderr, features)
+    dropped = _engine_verdict(cve, kernel, cmd, returncode, stderr, features)
     if dropped is None:
         return stdout
 
@@ -310,7 +311,7 @@ def _run_spatch(
     except spatch_zygote.ZygoteDied as err:
         # Only a demanded zygote retries on the zygote, and it fails loudly.
         raise SpatchError(cve, kernel, -1, str(err)) from err
-    dropped = _engine_verdict(cve, kernel, returncode, stderr, features)
+    dropped = _engine_verdict(cve, kernel, retry_cmd, returncode, stderr, features)
     if dropped is not None:
         raise _truncated(cve, kernel, returncode, stderr, dropped, retried=True)
     return stdout
@@ -319,12 +320,13 @@ def _run_spatch(
 def _engine_verdict(
     cve: str,
     kernel: str,
+    cmd: list[str],
     returncode: int,
     stderr: str,
     features: frozenset[str],
 ) -> list[tuple[str, str]] | None:
     """The engine half: raise for a timeout or a failed run, else the files a
-    completed run dropped -- None when it scanned everything it was given.
+    run dropped -- None when it scanned everything it was given.
 
     A question the classifiers answer from stderr plus the exit code: handed a
     directory, spatch drops the file it gave up on and still exits 0, so neither
@@ -333,6 +335,12 @@ def _engine_verdict(
     returned rather than raised so the caller can decide on one rerun. Returning
     stdout for it would answer "not vulnerable" for a file never looked at, and a
     caller's cache would keep that.
+
+    Handed files by name, spatch instead dies on the first exception without
+    naming the file. When that exception is a cache fault, the run comes back as
+    a drop of every source the command named, so the caller evicts their entries
+    and reruns once without the cache; otherwise, and always without a cache on
+    the command line, a non-zero exit is the engine's failure.
     """
     timed_out = parse_spatch_timeout(stderr, returncode)
     if timed_out is not None:
@@ -358,6 +366,11 @@ def _engine_verdict(
         if counts.get('dropped') or counts.get('unreadable'):
             return parse_spatch_drops(stderr) or parse_spatch_truncation(stderr) or []
         return None
+    if '--cache-prefix' in cmd:
+        sources = _cmd_sources(cmd)
+        lost = [(exn, file) for exn in parse_spatch_fatal(stderr) for file in sources]
+        if is_cache_fault(lost):
+            return lost
     raise SpatchError(cve, kernel, returncode, stderr)
 
 
@@ -412,6 +425,13 @@ def _cache_prefix(cmd: list[str]) -> str | None:
 def _without_cache_prefix(cmd: list[str]) -> list[str]:
     at = cmd.index('--cache-prefix')
     return cmd[:at] + cmd[at + 2 :]
+
+
+def _cmd_sources(cmd: list[str]) -> list[str]:
+    """The sources a check_cve command line names: the operands after the rule,
+    then each --include, which spatch parses and caches the same way."""
+    sources = cmd[cmd.index('--cocci-file') + 2 :] if '--cocci-file' in cmd else []
+    return sources + [cmd[at + 1] for at, arg in enumerate(cmd[:-1]) if arg == '--include']
 
 
 def _exec_spatch(cmd: list[str], env: dict[str, str], wall_timeout: int) -> tuple[int, str, str]:

@@ -14,7 +14,7 @@ and is otherwise reported as truncated, never returned as clean.
 import pathlib
 
 import pytest
-from conftest import SPATCH_TRAILER, TORN_CACHE_STDERR
+from conftest import NAMED_TORN_STDERR, SPATCH_TRAILER, TORN_CACHE_STDERR
 
 import cvehound
 from cvehound import spatch_zygote
@@ -109,6 +109,9 @@ def test_fallback_timeout_is_classified(monkeypatch):
 
 TORN = (0, '', TORN_CACHE_STDERR)
 OOM = (0, '', 'EXN: Out_of_memory in /k/net/mptcp/protocol.c\n' + SPATCH_TRAILER)
+# Handed files by name, spatch dies on the first exception and names no file.
+NAMED_TORN = (255, '', NAMED_TORN_STDERR)
+NAMED_OOM = (255, '', 'exn while in timeout_function\nFatal error: exception Out_of_memory\n')
 HIT = (0, 'hit', '')
 
 
@@ -121,6 +124,12 @@ def cached_cmd(tmp_path):
     for suffix in ('.ast_raw', '.depend_raw'):
         (stem.parent / (stem.name + suffix)).write_bytes(b'torn')
     return ['spatch', '--cache-prefix', str(prefix), '--very-quiet', '--cocci-file', 'r.cocci']
+
+
+def command(cached_cmd, shape):
+    """cached_cmd as a directory scan ('dir'), or naming the file, with or without the cache."""
+    cmd = cached_cmd if shape == 'dir' else [*cached_cmd, '/k/net/mptcp/protocol.c']
+    return cvehound._without_cache_prefix(cmd) if shape == 'named-uncached' else cmd
 
 
 def scripted(monkeypatch, zygote=(), execs=()):
@@ -145,27 +154,39 @@ def scripted(monkeypatch, zygote=(), execs=()):
 
 
 @pytest.mark.parametrize(
-    ('mode', 'zygote', 'execs', 'transports', 'cache_kept'),
+    ('shape', 'mode', 'zygote', 'execs', 'transports', 'cache_kept'),
     [
-        (None, [], [TORN, HIT], ['exec', 'exec'], False),
-        ('auto', [TORN], [HIT], ['zygote', 'exec'], False),
+        ('dir', None, [], [TORN, HIT], ['exec', 'exec'], False),
+        ('dir', 'auto', [TORN], [HIT], ['zygote', 'exec'], False),
         # The child started on the server's heap; one exec gets a fresh budget.
-        ('auto', [OOM], [HIT], ['zygote', 'exec'], True),
-        ('on', [TORN, HIT], [], ['zygote', 'zygote'], False),
+        ('dir', 'auto', [OOM], [HIT], ['zygote', 'exec'], True),
+        ('dir', 'on', [TORN, HIT], [], ['zygote', 'zygote'], False),
+        # Every file the command named is evicted: the run did not say which one it was.
+        ('named', None, [], [NAMED_TORN, HIT], ['exec', 'exec'], False),
+        # The failed child degrades to one exec first; that exec meets the same entry.
+        ('named', 'auto', [NAMED_TORN], [NAMED_TORN, HIT], ['zygote', 'exec', 'exec'], False),
     ],
     ids=[
         'torn-cache-on-exec',
         'torn-cache-on-the-zygote',
         'out-of-memory-in-a-zygote-child',
         'a-demanded-zygote-stays',
+        'named-torn-cache',
+        'named-after-a-failed-child',
     ],
 )
 def test_a_rerun_that_can_help_runs_once(
-    monkeypatch, cached_cmd, mode, zygote, execs, transports, cache_kept
+    monkeypatch, cached_cmd, shape, mode, zygote, execs, transports, cache_kept
 ):
     calls = scripted(monkeypatch, zygote=zygote, execs=execs)
     out = cvehound._run_spatch(
-        'CVE-1', '/k', cached_cmd, 60, '/tmp', zygote=mode is not None, demanded=mode == 'on'
+        'CVE-1',
+        '/k',
+        command(cached_cmd, shape),
+        60,
+        '/tmp',
+        zygote=mode is not None,
+        demanded=mode == 'on',
     )
     assert out == 'hit'
     assert [name for name, _ in calls] == transports
@@ -175,23 +196,41 @@ def test_a_rerun_that_can_help_runs_once(
 
 
 @pytest.mark.parametrize(
-    ('execs', 'raised', 'runs'),
+    ('shape', 'execs', 'raised', 'runs'),
     [
         # A fresh exec under the same cap would only repeat it.
-        ([OOM], SpatchTruncated, 1),
-        ([TORN, TORN], SpatchTruncated, 2),
-        ([TORN, TimeoutError('killed at the wall')], SpatchTimeout, 2),
+        ('dir', [OOM], SpatchTruncated, 1),
+        ('dir', [TORN, TORN], SpatchTruncated, 2),
+        ('dir', [TORN, TimeoutError('killed at the wall')], SpatchTimeout, 2),
+        ('named', [NAMED_OOM], SpatchError, 1),
+        ('named-uncached', [NAMED_TORN], SpatchError, 1),
+        ('named', [NAMED_TORN, NAMED_OOM], SpatchError, 2),
     ],
-    ids=['out-of-memory', 'a-second-truncation', 'a-rerun-that-times-out'],
+    ids=[
+        'out-of-memory',
+        'a-second-truncation',
+        'a-rerun-that-times-out',
+        'named-not-a-cache-fault',
+        'named-no-cache-on-the-line',
+        'a-named-rerun-that-fails',
+    ],
 )
-def test_a_failure_a_rerun_cannot_fix_is_the_answer(monkeypatch, cached_cmd, execs, raised, runs):
+def test_a_failure_a_rerun_cannot_fix_is_the_answer(
+    monkeypatch, cached_cmd, shape, execs, raised, runs
+):
     calls = scripted(monkeypatch, execs=execs)
     with pytest.raises(raised) as excinfo:
-        cvehound._run_spatch('CVE-1', '/k', cached_cmd, 60, '/tmp')
+        cvehound._run_spatch('CVE-1', '/k', command(cached_cmd, shape), 60, '/tmp')
     assert type(excinfo.value) is raised
     assert len(calls) == runs
     if raised is SpatchTruncated:
         assert excinfo.value.retried is (runs == 2)
+
+
+def test_named_sources_include_the_forced_include():
+    cmd = ['spatch', '--include', '/k/kconfig.h', '--cocci-file', 'r.cocci', '/k/a.c', '/k/b.h']
+    assert cvehound._cmd_sources(cmd) == ['/k/a.c', '/k/b.h', '/k/kconfig.h']
+    assert cvehound._cmd_sources(['spatch']) == []
 
 
 @pytest.mark.parametrize(
