@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cvehound"
-version = "1.7.0"
+version = "1.8.0"
 description = "A tool to check linux kernel source dump for known CVEs"
 readme = "README.md"
 license = {text = "GPLv3"}

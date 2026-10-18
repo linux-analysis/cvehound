@@ -40,7 +40,7 @@ from cvehound.util import (
     spatch_features,
 )
 
-__VERSION__ = '1.7.0'
+__VERSION__ = '1.8.0'
 
 # The transport and engine verdicts get their own logger: they are rare and they
 # are the only record of why a scan was rerun, so a harness that silences the

@@ -1,6 +1,6 @@
 # ChangeLog
 
-## Unreleased
+## 1.8.0 - Oct 18 2026
 
  - A whole-tree scan that drops a file is an error, no longer a clean verdict. Handed a
    directory, spatch skips any file it raised on, prints `EXN: <exception> in <file>` and
@@ -31,6 +31,15 @@
    `make install`) no longer fails every rule with `standard.h: Permission denied`
  - The AST cache is pruned dependency-first, so a scan racing the prune re-parses instead
    of reading a dependency record whose value is gone
+ - sympy is no longer a dependency, which saves 47 MB installed and an import in every pool
+   worker. `--kernel-config` used it only to evaluate and print Kbuild conditions; a small
+   parser for that grammar (CONFIG symbols, `&`, `|`, `~`, parentheses) now does both. No
+   verdict changes; a few `logic` strings in reports come out shorter
+ - CVE-2019-15221 no longer reports linux-next's stricter max packet size check in
+   `line6_init_pcm()` (`in < 6 || out < 6`) as a missing fix
+ - The project moved to github.com/linux-analysis/cvehound, and cvehound-spatch with it.
+   `cvehound update` fetches content from the new location, and a CITATION.cff gives the
+   citation metadata
 
 ## 1.7.0 - Sep 09 2026
 
