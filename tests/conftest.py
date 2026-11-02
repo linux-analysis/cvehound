@@ -60,7 +60,6 @@ missing_backports = [
     ('CVE-2023-23005', 'stable/linux-6.1.y'),
     ('CVE-2024-26595', 'stable/linux-5.10.y'),
     ('CVE-2024-26595', 'stable/linux-5.15.y'),
-    ('CVE-2024-26799', 'stable/linux-6.1.y'),
 ]
 
 
