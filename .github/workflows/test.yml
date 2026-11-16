@@ -36,24 +36,34 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest]
         ocaml-version: [4.11.2]
         # The floor we support (1.1.0), whatever the distro ships, the spatch
         # cvehound bundles itself, and today's upstream tip.
         coccinelle-version: [1.1.0, system, bundled, git]
-        # One python per coccinelle version. These entries only add a key to an
-        # already existing combination, so the matrix stays at 4 jobs. Pytest runs
-        # on the requires-python floor (3.11) everywhere except one job on 3.14,
-        # which defaults to the forkserver start method on Linux and covers the
-        # CLI pool path under it (see tests/test_10_cli.py).
+        # One runner and one python per coccinelle version. These entries only add
+        # keys to an already existing combination, so the matrix stays at 4 jobs.
+        # Pytest runs on the requires-python floor (3.11) everywhere except one job
+        # on 3.14, which defaults to the forkserver start method on Linux and covers
+        # the CLI pool path under it (see tests/test_10_cli.py).
+        #
+        # The opam jobs stay on ubuntu-24.04. 26.04 builds with GCC 15, which
+        # defaults to C23, where OCaml 4.11.2's `value (*c_primitive)()` takes no
+        # arguments and the runtime does not compile (strict prototypes landed in
+        # 4.14.2); and coccinelle 1.1.0 needs pcre1 (conf-libpcre), whose
+        # libpcre3-dev 26.04 no longer ships. Git coccinelle uses pcre2, so only
+        # the shared ocaml-version keeps it here.
         include:
         - coccinelle-version: 1.1.0
+          os: ubuntu-24.04
           python-version: "3.11"
         - coccinelle-version: system
+          os: ubuntu-latest
           python-version: "3.11"
         - coccinelle-version: bundled
+          os: ubuntu-latest
           python-version: "3.14"
         - coccinelle-version: git
+          os: ubuntu-24.04
           python-version: "3.11"
     runs-on: ${{ matrix.os }}
     steps:
@@ -174,7 +184,15 @@ jobs:
         # cache warm forever, so without the tag refspec the newest tags
         # test_05's tags mode iterates would freeze at the bundle's date.
         git fetch --no-tags origin master '+refs/tags/v*:refs/tags/v*'
-        git fetch --no-tags next
+        # git.kernel.org is the one host here that is not GitHub, and it can be
+        # unreachable from runners (2026-11-16: both jobs that got this far timed
+        # out connecting, from the region that fetched fine a week earlier).
+        # kernel.googlesource.com mirrors linux-next with identical history; the
+        # set-url above restores the canonical URL on the next run.
+        git fetch --no-tags next || {
+          git remote set-url next https://kernel.googlesource.com/pub/scm/linux/kernel/git/next/linux-next
+          git fetch --no-tags next
+        }
         git fetch --no-tags stable
         # CVE-2019-18680 was introduced and fixed on linux-4.4.y alone, so its
         # Fix: and Fixes: are on no branch above. The clone bundle used to carry
