@@ -76,7 +76,7 @@ jobs:
       run: echo "date=$(date +'%Y-%m')" >> $GITHUB_OUTPUT
 
     - name: Install uv with Python ${{ matrix.python-version }}
-      uses: astral-sh/setup-uv@v10.3.3
+      uses: astral-sh/setup-uv@v10.4.0
       with:
         python-version: ${{ matrix.python-version }}
         enable-cache: true
